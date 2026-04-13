@@ -81,7 +81,7 @@ public class MorfinauthBlePlugin implements FlutterPlugin, MethodCallHandler, Mo
       case "connectDevice":
         String macAddress = call.argument("macAddress");
         currentDevice = new MorfinBleDevice();
-        currentDevice.address = macAddress; // SDK uses this to connect
+        currentDevice.macAddress = macAddress; // macAddress
         int connectRet = morfinAuthBLE.ConnectDevice(currentDevice);
         result.success(connectRet);
         break;
@@ -117,9 +117,8 @@ public class MorfinauthBlePlugin implements FlutterPlugin, MethodCallHandler, Mo
     }
   }
 
-  // ==========================================
+
   // MorfinAuthBLE_Callback Implementations
-  // ==========================================
 
   @Override
   public void OnDeviceDiscovered(MorfinBleDevice device) {
@@ -127,7 +126,7 @@ public class MorfinauthBlePlugin implements FlutterPlugin, MethodCallHandler, Mo
       Map<String, Object> data = new HashMap<>();
       data.put("event", "OnDeviceDiscovered");
       data.put("name", device.name);
-      data.put("macAddress", device.address);
+      data.put("macAddress", device.macAddress); // macAddress
       eventSink.success(data);
     }
   }
@@ -152,29 +151,6 @@ public class MorfinauthBlePlugin implements FlutterPlugin, MethodCallHandler, Mo
     }
   }
 
-  @Override
-  public void OnPreview(int errorCode, int quality, byte[] image) {
-    if (eventSink != null) {
-      Map<String, Object> data = new HashMap<>();
-      data.put("event", "OnPreview");
-      data.put("errorCode", errorCode);
-      data.put("quality", quality);
-      data.put("image", image); // Flutter will receive this as a Uint8List!
-      eventSink.success(data);
-    }
-  }
-
-  @Override
-  public void OnComplete(int errorCode, int quality, int nfiq) {
-    if (eventSink != null) {
-      Map<String, Object> data = new HashMap<>();
-      data.put("event", "OnComplete");
-      data.put("errorCode", errorCode);
-      data.put("quality", quality);
-      data.put("nfiq", nfiq);
-      eventSink.success(data);
-    }
-  }
 
   @Override
   public void onDetachedFromEngine(@NonNull FlutterPluginBinding binding) {

@@ -1,0 +1,14 @@
+
+
+enum ImageFormatType {
+  BMP,
+  JPEG2000,
+  WSQ,
+  RAW,
+  FIR_V2005,
+  FIR_V2011,
+  FIRWSQ_V2005,
+  FIRWSQ_V2011,
+  FIRJPEG_V2005,
+  FIRJPEG_V2011,
+}
