@@ -1,6 +1,9 @@
 package com.mantra.morfinauth_ble;
 
 import android.content.Context;
+import android.os.Handler;
+import android.os.Looper;
+
 import androidx.annotation.NonNull;
 
 import com.mantra.morfinauth.DeviceInfo;
@@ -9,7 +12,9 @@ import com.mantra.morfinauth.ble.MorfinAuthBLE_Callback;
 import com.mantra.morfinauth.ble.enums.CaptureFormat;
 import com.mantra.morfinauth.ble.enums.MorfinBleState;
 import com.mantra.morfinauth.ble.enums.MorfinNotifications;
+import com.mantra.morfinauth.ble.model.BatteryInformation;
 import com.mantra.morfinauth.ble.model.MorfinBleDevice;
+import com.mantra.morfinauth.enums.TemplateFormat;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -18,50 +23,68 @@ import io.flutter.embedding.engine.plugins.FlutterPlugin;
 import io.flutter.plugin.common.EventChannel;
 import io.flutter.plugin.common.MethodCall;
 import io.flutter.plugin.common.MethodChannel;
-import io.flutter.plugin.common.MethodChannel.MethodCallHandler;
-import io.flutter.plugin.common.MethodChannel.Result;
 
-public class MorfinauthBlePlugin implements FlutterPlugin, MethodCallHandler, MorfinAuthBLE_Callback {
+public class MorfinauthBlePlugin implements FlutterPlugin, MethodChannel.MethodCallHandler, MorfinAuthBLE_Callback {
   private MethodChannel methodChannel;
-  private EventChannel eventChannel;
-  private EventChannel.EventSink eventSink;
+  private EventChannel discoveryChannel;
+  private EventChannel connectionChannel;
+  private EventChannel notificationChannel;
+
+  private EventChannel.EventSink discoverySink;
+  private EventChannel.EventSink connectionSink;
+  private EventChannel.EventSink notificationSink;
 
   private Context context;
   private MorfinAuthBLE morfinAuthBLE;
-  private MorfinBleDevice currentDevice;
+
+  // Handler to safely push background hardware events to the Flutter Main UI Thread
+  private final Handler uiThreadHandler = new Handler(Looper.getMainLooper());
+
+  // Cache to hold discovered devices by MAC address
+  private final HashMap<String, MorfinBleDevice> discoveredDevicesCache = new HashMap<>();
 
   @Override
   public void onAttachedToEngine(@NonNull FlutterPluginBinding flutterPluginBinding) {
     context = flutterPluginBinding.getApplicationContext();
 
-    // Setup Method Channel for Dart -> Java commands
-    methodChannel = new MethodChannel(flutterPluginBinding.getBinaryMessenger(), "morfinauth_ble/commands");
-    methodChannel.setMethodCallHandler(this);
-
-    // Setup Event Channel for Java -> Dart continuous data
-    eventChannel = new EventChannel(flutterPluginBinding.getBinaryMessenger(), "morfinauth_ble/events");
-    eventChannel.setStreamHandler(new EventChannel.StreamHandler() {
-      @Override
-      public void onListen(Object arguments, EventChannel.EventSink events) {
-        eventSink = events;
-      }
-
-      @Override
-      public void onCancel(Object arguments) {
-        eventSink = null;
-      }
-    });
-
-    // Initialize the Mantra SDK Wrapper
     try {
       morfinAuthBLE = new MorfinAuthBLE(context, this);
     } catch (Exception e) {
       e.printStackTrace();
     }
+
+    // Setup Method Channel
+    methodChannel = new MethodChannel(flutterPluginBinding.getBinaryMessenger(), "morfinauth_ble");
+    methodChannel.setMethodCallHandler(this);
+
+    // Setup Event Channels for Streams
+    discoveryChannel = new EventChannel(flutterPluginBinding.getBinaryMessenger(), "morfinauth_ble/discovery");
+    discoveryChannel.setStreamHandler(new EventChannel.StreamHandler() {
+      @Override
+      public void onListen(Object arguments, EventChannel.EventSink events) { discoverySink = events; }
+      @Override
+      public void onCancel(Object arguments) { discoverySink = null; }
+    });
+
+    connectionChannel = new EventChannel(flutterPluginBinding.getBinaryMessenger(), "morfinauth_ble/connection");
+    connectionChannel.setStreamHandler(new EventChannel.StreamHandler() {
+      @Override
+      public void onListen(Object arguments, EventChannel.EventSink events) { connectionSink = events; }
+      @Override
+      public void onCancel(Object arguments) { connectionSink = null; }
+    });
+
+    notificationChannel = new EventChannel(flutterPluginBinding.getBinaryMessenger(), "morfinauth_ble/notifications");
+    notificationChannel.setStreamHandler(new EventChannel.StreamHandler() {
+      @Override
+      public void onListen(Object arguments, EventChannel.EventSink events) { notificationSink = events; }
+      @Override
+      public void onCancel(Object arguments) { notificationSink = null; }
+    });
   }
 
   @Override
-  public void onMethodCall(@NonNull MethodCall call, @NonNull Result result) {
+  public void onMethodCall(@NonNull MethodCall call, @NonNull MethodChannel.Result result) {
     if (morfinAuthBLE == null) {
       result.error("UNAVAILABLE", "MorfinAuthBLE not initialized", null);
       return;
@@ -69,46 +92,111 @@ public class MorfinauthBlePlugin implements FlutterPlugin, MethodCallHandler, Mo
 
     switch (call.method) {
       case "discoverDevices":
-        int discoverRet = morfinAuthBLE.DiscoverDevices();
-        result.success(discoverRet);
+        discoveredDevicesCache.clear();
+        result.success(morfinAuthBLE.DiscoverDevices());
         break;
 
       case "stopDiscover":
-        int stopDiscRet = morfinAuthBLE.StopDiscover();
-        result.success(stopDiscRet);
+        result.success(morfinAuthBLE.StopDiscover());
         break;
 
       case "connectDevice":
-        String macAddress = call.argument("macAddress");
-        currentDevice = new MorfinBleDevice();
-        currentDevice.macAddress = macAddress; // macAddress
-        int connectRet = morfinAuthBLE.ConnectDevice(currentDevice);
-        result.success(connectRet);
+        String address = call.argument("address");
+        MorfinBleDevice device = discoveredDevicesCache.get(address);
+
+        // Fallback: If device wasn't discovered in this session but user has the MAC address
+        if (device == null && address != null) {
+          device = new MorfinBleDevice();
+          device.macAddress = address;
+        }
+
+        if (device != null) {
+          result.success(morfinAuthBLE.ConnectDevice(device));
+        } else {
+          result.error("DEVICE_NOT_FOUND", "MAC Address is null", null);
+        }
         break;
 
-      case "disconnectDevice":
-        int disconnectRet = morfinAuthBLE.Disconnect();
-        result.success(disconnectRet);
+      case "disconnect":
+        result.success(morfinAuthBLE.Disconnect());
         break;
 
       case "initDevice":
+        String clientKey = call.argument("clientKey");
+        if (clientKey == null) clientKey = "";
+
         DeviceInfo info = new DeviceInfo();
-        int initRet = morfinAuthBLE.InitDevice("", info);
-        result.success(initRet);
+        int initRet = morfinAuthBLE.InitDevice(clientKey, info);
+
+        Map<String, Object> infoMap = new HashMap<>();
+        infoMap.put("status", initRet);
+        if (initRet == 0) {
+          infoMap.put("make", info.Make);
+          infoMap.put("model", info.Model);
+          infoMap.put("serialNo", info.SerialNo);
+        }
+        result.success(infoMap);
+        break;
+
+      case "unInitDevice":
+        result.success(morfinAuthBLE.UnInitDevice());
         break;
 
       case "startCapture":
-        Integer quality = call.argument("quality");
-        Integer timeout = call.argument("timeout");
-        int[] qty = new int[1];
-        int[] nfiq = new int[1];
-        int captureRet = morfinAuthBLE.StartCapture(CaptureFormat.FIR_2005, quality != null ? quality : 60, timeout != null ? timeout : 10000, qty, nfiq);
-        result.success(captureRet);
+        // Run heavy capture process on a background thread to prevent UI freezing
+        new Thread(() -> {
+          Integer minQuality = call.argument("minQuality");
+          Integer timeout = call.argument("timeout");
+
+          int q = (minQuality != null) ? minQuality : 60;
+          int t = (timeout != null) ? timeout : 10000;
+
+          int[] quality = new int[1];
+          int[] nfiq = new int[1];
+
+          // Start Capture
+          int capRet = morfinAuthBLE.StartCapture(CaptureFormat.FIR_2005, q, t, quality, nfiq);
+
+          Map<String, Object> capResult = new HashMap<>();
+          capResult.put("status", capRet);
+          capResult.put("quality", quality[0]);
+          capResult.put("nfiq", nfiq[0]);
+
+          // If capture success, immediately pull the template data
+          if (capRet == 0) {
+            int[] tSize = new int[1];
+            byte[] template = new byte[256 * 360 + 1111]; // Max size buffer for template
+            int tRet = morfinAuthBLE.GetTemplate(TemplateFormat.FMR_V2005, template, tSize);
+
+            if (tRet == 0 && tSize[0] > 0) {
+              byte[] finalData = new byte[tSize[0]];
+              System.arraycopy(template, 0, finalData, 0, tSize[0]);
+              capResult.put("templateData", finalData);
+            }
+          }
+
+          // Return result safely on the Main UI Thread
+          uiThreadHandler.post(() -> result.success(capResult));
+        }).start();
         break;
 
       case "stopCapture":
-        int stopCapRet = morfinAuthBLE.StopCapture();
-        result.success(stopCapRet);
+        result.success(morfinAuthBLE.StopCapture());
+        break;
+
+      case "getBatteryInformation":
+        BatteryInformation batInfo = new BatteryInformation();
+        int batRet = morfinAuthBLE.GetBatteryInformation(batInfo);
+        Map<String, Object> batMap = new HashMap<>();
+        batMap.put("status", batRet);
+
+        if (batRet == 0) {
+          batMap.put("percentage", batInfo.batteryChargePercentage);
+          batMap.put("health", batInfo.batteryHealthPercentage);
+          batMap.put("temperature", batInfo.batteryTemperature);
+          batMap.put("chargerConnected", batInfo.chargerConnected);
+        }
+        result.success(batMap);
         break;
 
       default:
@@ -117,48 +205,50 @@ public class MorfinauthBlePlugin implements FlutterPlugin, MethodCallHandler, Mo
     }
   }
 
-
-  // MorfinAuthBLE_Callback Implementations
+  // ==========================================
+  // SDK CALLBACKS
+  // ==========================================
 
   @Override
-  public void OnDeviceDiscovered(MorfinBleDevice device) {
-    if (eventSink != null && device != null) {
-      Map<String, Object> data = new HashMap<>();
-      data.put("event", "OnDeviceDiscovered");
-      data.put("name", device.name);
-      data.put("macAddress", device.macAddress); // macAddress
-      eventSink.success(data);
+  public void OnDeviceDiscovered(MorfinBleDevice morfinBleDevice) {
+    if (discoverySink != null && morfinBleDevice != null) {
+      discoveredDevicesCache.put(morfinBleDevice.macAddress, morfinBleDevice);
+
+      Map<String, String> deviceData = new HashMap<>();
+      deviceData.put("name", morfinBleDevice.name != null ? morfinBleDevice.name : "Unknown Device");
+      deviceData.put("address", morfinBleDevice.macAddress);
+
+      uiThreadHandler.post(() -> {
+        if (discoverySink != null) discoverySink.success(deviceData);
+      });
     }
   }
 
   @Override
-  public void OnDeviceConnectionStatus(MorfinBleDevice device, MorfinBleState state) {
-    if (eventSink != null) {
-      Map<String, Object> data = new HashMap<>();
-      data.put("event", "OnDeviceConnectionStatus");
-      data.put("state", state.name()); // "CONNECTED", "DISCONNECTED", etc.
-      eventSink.success(data);
+  public void OnDeviceConnectionStatus(MorfinBleDevice morfinBleDevice, MorfinBleState morfinBleState) {
+    if (connectionSink != null && morfinBleState != null) {
+      uiThreadHandler.post(() -> {
+        if (connectionSink != null) connectionSink.success(morfinBleState.name());
+      });
     }
   }
 
   @Override
-  public void MorfinDeviceStatusNotification(MorfinNotifications notification) {
-    if (eventSink != null) {
-      Map<String, Object> data = new HashMap<>();
-      data.put("event", "MorfinDeviceStatusNotification");
-      data.put("notification", notification.name());
-      eventSink.success(data);
+  public void MorfinDeviceStatusNotification(MorfinNotifications morfinNotifications) {
+    if (notificationSink != null && morfinNotifications != null) {
+      uiThreadHandler.post(() -> {
+        if (notificationSink != null) notificationSink.success(morfinNotifications.name());
+      });
     }
   }
-
 
   @Override
   public void onDetachedFromEngine(@NonNull FlutterPluginBinding binding) {
     methodChannel.setMethodCallHandler(null);
-    eventChannel.setStreamHandler(null);
     if (morfinAuthBLE != null) {
       morfinAuthBLE.Disconnect();
       morfinAuthBLE.UnInitDevice();
+      morfinAuthBLE = null;
     }
   }
 }
