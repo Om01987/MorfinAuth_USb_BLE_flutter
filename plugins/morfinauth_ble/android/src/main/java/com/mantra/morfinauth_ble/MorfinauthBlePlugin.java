@@ -14,7 +14,8 @@ import com.mantra.morfinauth.ble.enums.MorfinBleState;
 import com.mantra.morfinauth.ble.enums.MorfinNotifications;
 import com.mantra.morfinauth.ble.model.BatteryInformation;
 import com.mantra.morfinauth.ble.model.MorfinBleDevice;
-import com.mantra.morfinauth.enums.TemplateFormat;
+
+import com.mantra.morfinauth.enums.ImageFormat;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -26,13 +27,18 @@ import io.flutter.plugin.common.MethodChannel;
 
 public class MorfinauthBlePlugin implements FlutterPlugin, MethodChannel.MethodCallHandler, MorfinAuthBLE_Callback {
   private MethodChannel methodChannel;
+
+  // Event Channels
   private EventChannel discoveryChannel;
   private EventChannel connectionChannel;
   private EventChannel notificationChannel;
+  private EventChannel imageChannel;
 
+  // Event Sinks
   private EventChannel.EventSink discoverySink;
   private EventChannel.EventSink connectionSink;
   private EventChannel.EventSink notificationSink;
+  private EventChannel.EventSink imageSink;
 
   private Context context;
   private MorfinAuthBLE morfinAuthBLE;
@@ -60,26 +66,26 @@ public class MorfinauthBlePlugin implements FlutterPlugin, MethodChannel.MethodC
     // Setup Event Channels for Streams
     discoveryChannel = new EventChannel(flutterPluginBinding.getBinaryMessenger(), "morfinauth_ble/discovery");
     discoveryChannel.setStreamHandler(new EventChannel.StreamHandler() {
-      @Override
-      public void onListen(Object arguments, EventChannel.EventSink events) { discoverySink = events; }
-      @Override
-      public void onCancel(Object arguments) { discoverySink = null; }
+      @Override public void onListen(Object arguments, EventChannel.EventSink events) { discoverySink = events; }
+      @Override public void onCancel(Object arguments) { discoverySink = null; }
     });
 
     connectionChannel = new EventChannel(flutterPluginBinding.getBinaryMessenger(), "morfinauth_ble/connection");
     connectionChannel.setStreamHandler(new EventChannel.StreamHandler() {
-      @Override
-      public void onListen(Object arguments, EventChannel.EventSink events) { connectionSink = events; }
-      @Override
-      public void onCancel(Object arguments) { connectionSink = null; }
+      @Override public void onListen(Object arguments, EventChannel.EventSink events) { connectionSink = events; }
+      @Override public void onCancel(Object arguments) { connectionSink = null; }
     });
 
     notificationChannel = new EventChannel(flutterPluginBinding.getBinaryMessenger(), "morfinauth_ble/notifications");
     notificationChannel.setStreamHandler(new EventChannel.StreamHandler() {
-      @Override
-      public void onListen(Object arguments, EventChannel.EventSink events) { notificationSink = events; }
-      @Override
-      public void onCancel(Object arguments) { notificationSink = null; }
+      @Override public void onListen(Object arguments, EventChannel.EventSink events) { notificationSink = events; }
+      @Override public void onCancel(Object arguments) { notificationSink = null; }
+    });
+
+    imageChannel = new EventChannel(flutterPluginBinding.getBinaryMessenger(), "morfinauth_ble/image");
+    imageChannel.setStreamHandler(new EventChannel.StreamHandler() {
+      @Override public void onListen(Object arguments, EventChannel.EventSink events) { imageSink = events; }
+      @Override public void onCancel(Object arguments) { imageSink = null; }
     });
   }
 
@@ -143,7 +149,7 @@ public class MorfinauthBlePlugin implements FlutterPlugin, MethodChannel.MethodC
         break;
 
       case "startCapture":
-        // Run heavy capture process on a background thread to prevent UI freezing
+        // Run heavy capture process on a background thread
         new Thread(() -> {
           Integer minQuality = call.argument("minQuality");
           Integer timeout = call.argument("timeout");
@@ -154,7 +160,7 @@ public class MorfinauthBlePlugin implements FlutterPlugin, MethodChannel.MethodC
           int[] quality = new int[1];
           int[] nfiq = new int[1];
 
-          // Start Capture
+          // Call SDK StartCapture - This blocks until the finger is scanned or timeout is reached
           int capRet = morfinAuthBLE.StartCapture(CaptureFormat.FIR_2005, q, t, quality, nfiq);
 
           Map<String, Object> capResult = new HashMap<>();
@@ -162,20 +168,31 @@ public class MorfinauthBlePlugin implements FlutterPlugin, MethodChannel.MethodC
           capResult.put("quality", quality[0]);
           capResult.put("nfiq", nfiq[0]);
 
-          // If capture success, immediately pull the template data
+          // If capture is successful, manually fetch the image and push to Dart Stream
           if (capRet == 0) {
-            int[] tSize = new int[1];
-            byte[] template = new byte[256 * 360 + 1111]; // Max size buffer for template
-            int tRet = morfinAuthBLE.GetTemplate(TemplateFormat.FMR_V2005, template, tSize);
+            try {
+              int[] imgSize = new int[1];
+              byte[] imgBuffer = new byte[256 * 360 + 1111];
 
-            if (tRet == 0 && tSize[0] > 0) {
-              byte[] finalData = new byte[tSize[0]];
-              System.arraycopy(template, 0, finalData, 0, tSize[0]);
-              capResult.put("templateData", finalData);
+              // FIX APPLIED HERE: Added ImageFormat.BMP as the first argument
+              int imgRet = morfinAuthBLE.GetImage(ImageFormat.BMP, imgBuffer, imgSize);
+
+              if (imgRet == 0 && imgSize[0] > 0 && imageSink != null) {
+                byte[] finalImage = new byte[imgSize[0]];
+                System.arraycopy(imgBuffer, 0, finalImage, 0, imgSize[0]);
+
+                uiThreadHandler.post(() -> {
+                  if (imageSink != null) {
+                    imageSink.success(finalImage);
+                  }
+                });
+              }
+            } catch (Exception e) {
+              e.printStackTrace();
             }
           }
 
-          // Return result safely on the Main UI Thread
+          // Return final status map
           uiThreadHandler.post(() -> result.success(capResult));
         }).start();
         break;
